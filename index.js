@@ -12,10 +12,16 @@ const server = http.createServer(app);
 const allowedOrigins = [
   'http://localhost:5173', // Vite dev server
   'http://localhost:3000', // Alternative dev port
-  'https://nutsycom.vercel.app', // Your Vercel frontend domain
+  'https://www.nutsy.dev', // Your production frontend domain
+  'https://nutsy.dev', // Alternative domain
+  'https://nutsycom.vercel.app', // Vercel frontend domain
   'https://nutsycom-f.vercel.app', // Alternative Vercel domain
+  'https://nutsy-backend-197d2c7f6689.herokuapp.com', // Your Heroku backend domain
   process.env.FRONTEND_URL, // Environment variable for frontend URL
 ].filter(Boolean); // Remove undefined values
+
+console.log('Allowed origins:', allowedOrigins);
+console.log('NODE_ENV:', process.env.NODE_ENV);
 
 const io = new Server(server, {
   cors: {
