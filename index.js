@@ -31,6 +31,19 @@ app.get('/favicon.ico', (req, res) => {
   res.status(204).end(); // No content response
 });
 
+// Root route
+app.get('/', (req, res) => {
+  res.json({
+    message: 'NutsyCom Backend API',
+    version: '0.1.0',
+    endpoints: {
+      messages: '/api/rooms/:roomId/messages',
+      websocket: 'Socket.IO connection available'
+    },
+    status: 'running'
+  });
+});
+
 // REST endpoint to fetch messages for a room
 app.get('/api/rooms/:roomId/messages', async (req, res) => {
   const { roomId } = req.params;
