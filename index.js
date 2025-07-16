@@ -14,8 +14,22 @@ const io = new Server(server, {
   }
 });
 
+// Add CSP headers to allow necessary resources
+app.use((req, res, next) => {
+  res.setHeader(
+    'Content-Security-Policy',
+    "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdn.socket.io; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; connect-src 'self' ws: wss:; frame-src 'self';"
+  );
+  next();
+});
+
 app.use(cors());
 app.use(express.json());
+
+// Serve favicon
+app.get('/favicon.ico', (req, res) => {
+  res.status(204).end(); // No content response
+});
 
 // REST endpoint to fetch messages for a room
 app.get('/api/rooms/:roomId/messages', async (req, res) => {
