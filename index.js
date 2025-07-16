@@ -7,10 +7,24 @@ require('dotenv').config();
 
 const app = express();
 const server = http.createServer(app);
+
+// CORS configuration for different environments
+const allowedOrigins = [
+  'http://localhost:5173', // Vite dev server
+  'http://localhost:3000', // Alternative dev port
+  'https://nutsycom.vercel.app', // Your Vercel frontend domain
+  'https://nutsycom-f.vercel.app', // Alternative Vercel domain
+  process.env.FRONTEND_URL, // Environment variable for frontend URL
+].filter(Boolean); // Remove undefined values
+
 const io = new Server(server, {
   cors: {
-    origin: '*', // Adjust for production
-    methods: ['GET', 'POST']
+    origin: process.env.NODE_ENV === 'production' 
+      ? allowedOrigins
+      : '*',
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+    credentials: true,
+    allowedHeaders: ['Content-Type', 'Authorization']
   }
 });
 
@@ -23,7 +37,14 @@ app.use((req, res, next) => {
   next();
 });
 
-app.use(cors());
+app.use(cors({
+  origin: process.env.NODE_ENV === 'production' 
+    ? allowedOrigins
+    : '*',
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization']
+}));
 app.use(express.json());
 
 // Serve favicon
@@ -42,6 +63,29 @@ app.get('/', (req, res) => {
     },
     status: 'running'
   });
+});
+
+// Database initialization endpoint
+app.get('/api/init-db', async (req, res) => {
+  try {
+    const fs = require('fs');
+    const path = require('path');
+    const schema = fs.readFileSync(path.join(__dirname, 'db', 'schema.sql'), 'utf8');
+    
+    // Split schema into individual statements
+    const statements = schema.split(';').filter(stmt => stmt.trim());
+    
+    for (const statement of statements) {
+      if (statement.trim()) {
+        await db.query(statement);
+      }
+    }
+    
+    res.json({ message: 'Database initialized successfully' });
+  } catch (error) {
+    console.error('Database initialization error:', error);
+    res.status(500).json({ error: 'Failed to initialize database' });
+  }
 });
 
 // REST endpoint to fetch messages for a room
