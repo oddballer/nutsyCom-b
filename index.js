@@ -96,16 +96,23 @@ app.get('/api/init-db', async (req, res) => {
 
 // REST endpoint to fetch messages for a room
 app.get('/api/rooms/:roomId/messages', async (req, res) => {
-  const { roomId } = req.params;
-  const result = await db.query(
-    `SELECT messages.*, users.username
-     FROM messages
-     JOIN users ON messages.user_id = users.id
-     WHERE room_id = $1
-     ORDER BY sent_at ASC`,
-    [roomId]
-  );
-  res.json(result.rows);
+  try {
+    console.log('Received request for room:', req.params.roomId);
+    const { roomId } = req.params;
+    const result = await db.query(
+      `SELECT messages.*, users.username
+       FROM messages
+       JOIN users ON messages.user_id = users.id
+       WHERE room_id = $1
+       ORDER BY sent_at ASC`,
+      [roomId]
+    );
+    console.log('Found messages:', result.rows.length);
+    res.json(result.rows);
+  } catch (error) {
+    console.error('Error fetching messages:', error);
+    res.status(500).json({ error: 'Failed to fetch messages' });
+  }
 });
 
 // WebSocket events
@@ -127,15 +134,53 @@ io.on('connection', (socket) => {
 
   // Handle new message
   socket.on('chatMessage', async ({ roomId, userId, content }) => {
-    // Save to DB
-    const result = await db.query(
-      `INSERT INTO messages (room_id, user_id, content) VALUES ($1, $2, $3) RETURNING *`,
-      [roomId, userId, content]
-    );
-    const message = result.rows[0];
+    try {
+      console.log('Received message:', { roomId, userId, content });
+      
+      // First, ensure the user exists in the database
+      let userResult = await db.query('SELECT id FROM users WHERE id = $1', [userId]);
+      
+      if (userResult.rows.length === 0) {
+        // Create the user if they don't exist
+        console.log('Creating new user:', userId);
+        userResult = await db.query(
+          'INSERT INTO users (id, username) VALUES ($1, $2) RETURNING id',
+          [userId, `User ${userId}`]
+        );
+      }
+      
+      // Ensure the room exists
+      let roomResult = await db.query('SELECT id FROM chat_rooms WHERE id = $1', [roomId]);
+      
+      if (roomResult.rows.length === 0) {
+        // Create the room if it doesn't exist
+        console.log('Creating new room:', roomId);
+        roomResult = await db.query(
+          'INSERT INTO chat_rooms (id, name) VALUES ($1, $2) RETURNING id',
+          [roomId, `Room ${roomId}`]
+        );
+      }
+      
+      // Save message to DB
+      const result = await db.query(
+        `INSERT INTO messages (room_id, user_id, content) VALUES ($1, $2, $3) RETURNING *`,
+        [roomId, userId, content]
+      );
+      const message = result.rows[0];
+      
+      console.log('Message saved:', message);
 
-    // Broadcast to room
-    io.to(roomId).emit('chatMessage', message);
+      // Broadcast to room
+      io.to(roomId).emit('chatMessage', message);
+      
+    } catch (error) {
+      console.error('Error handling chat message:', error);
+      // Send error back to the client
+      socket.emit('chatError', { 
+        message: 'Failed to send message',
+        error: error.message 
+      });
+    }
   });
 
   socket.on('disconnect', () => {
