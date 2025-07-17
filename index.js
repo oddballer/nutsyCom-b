@@ -362,6 +362,21 @@ app.get('/api/rooms/:roomId/messages', auth.optionalAuth, async (req, res) => {
 const onlineUsers = new Map(); // userId -> socket.id
 const socketUsers = new Map(); // socket.id -> userId
 
+// Helper to emit all online user objects
+async function emitOnlineUsers() {
+  if (onlineUsers.size === 0) {
+    io.emit('onlineUsers', []);
+    return;
+  }
+  const userIds = Array.from(onlineUsers.keys());
+  // Fetch all user objects in a single query
+  const result = await db.query(
+    `SELECT id, username, display_name FROM users WHERE id = ANY($1)`,
+    [userIds]
+  );
+  io.emit('onlineUsers', result.rows);
+}
+
 io.on('connection', (socket) => {
   console.log('A user connected:', socket.id);
 
@@ -397,7 +412,7 @@ io.on('connection', (socket) => {
 
       socket.user = userResult.rows[0];
       socket.emit('authenticated', { user: socket.user });
-      io.emit('onlineUsers', Array.from(onlineUsers.keys()));
+      await emitOnlineUsers();
 
       console.log('User authenticated:', socket.user.username);
     } catch (error) {
@@ -480,12 +495,12 @@ io.on('connection', (socket) => {
     }
   });
 
-  socket.on('disconnect', () => {
+  socket.on('disconnect', async () => {
     const userId = socketUsers.get(socket.id);
     if (userId) {
       onlineUsers.delete(userId);
       socketUsers.delete(socket.id);
-      io.emit('onlineUsers', Array.from(onlineUsers.keys()));
+      await emitOnlineUsers();
       console.log('User disconnected:', socket.id);
     }
   });
