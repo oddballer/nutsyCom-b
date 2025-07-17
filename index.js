@@ -2,7 +2,9 @@ const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
 const cors = require('cors');
+const rateLimit = require('express-rate-limit');
 const db = require('./db');
+const auth = require('./auth');
 require('dotenv').config();
 
 const app = express();
@@ -34,6 +36,16 @@ const io = new Server(server, {
   }
 });
 
+// Rate limiting
+const limiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 100, // limit each IP to 100 requests per windowMs
+  message: 'Too many requests from this IP, please try again later.'
+});
+
+// Apply rate limiting to all routes
+app.use(limiter);
+
 // Add CSP headers to allow necessary resources
 app.use((req, res, next) => {
   res.setHeader(
@@ -62,10 +74,19 @@ app.get('/favicon.ico', (req, res) => {
 app.get('/', (req, res) => {
   res.json({
     message: 'NutsyCom Backend API',
-    version: '0.1.0',
+    version: '1.0.0',
     endpoints: {
-      messages: '/api/rooms/:roomId/messages',
-      websocket: 'Socket.IO connection available'
+      auth: {
+        register: 'POST /api/auth/register',
+        login: 'POST /api/auth/login',
+        logout: 'POST /api/auth/logout',
+        profile: 'GET /api/auth/profile'
+      },
+      chat: {
+        rooms: 'GET /api/rooms',
+        messages: 'GET /api/rooms/:roomId/messages',
+        websocket: 'Socket.IO connection available'
+      }
     },
     status: 'running'
   });
@@ -94,21 +115,243 @@ app.get('/api/init-db', async (req, res) => {
   }
 });
 
-// REST endpoint to fetch messages for a room
-app.get('/api/rooms/:roomId/messages', async (req, res) => {
+// Authentication routes
+app.post('/api/auth/register', async (req, res) => {
   try {
-    console.log('Received request for room:', req.params.roomId);
-    const { roomId } = req.params;
-    const result = await db.query(
-      `SELECT messages.*, users.username
-       FROM messages
-       JOIN users ON messages.user_id = users.id
-       WHERE room_id = $1
-       ORDER BY sent_at ASC`,
-      [roomId]
+    const { username, email, password, display_name } = req.body;
+
+    // Validation
+    if (!username || !password) {
+      return res.status(400).json({ error: 'Username and password are required' });
+    }
+
+    if (password.length < 6) {
+      return res.status(400).json({ error: 'Password must be at least 6 characters long' });
+    }
+
+    // Check if user already exists
+    const existingUser = await db.query(
+      'SELECT id FROM users WHERE username = $1 OR email = $2',
+      [username, email]
     );
-    console.log('Found messages:', result.rows.length);
+
+    if (existingUser.rows.length > 0) {
+      return res.status(409).json({ error: 'Username or email already exists' });
+    }
+
+    // Hash password
+    const passwordHash = await auth.hashPassword(password);
+
+    // Create user
+    const userResult = await db.query(
+      `INSERT INTO users (username, email, password_hash, display_name) 
+       VALUES ($1, $2, $3, $4) RETURNING id, username, email, display_name, created_at`,
+      [username, email, passwordHash, display_name || username]
+    );
+
+    const user = userResult.rows[0];
+
+    // Generate token
+    const token = auth.generateToken(user.id);
+
+    // Create session
+    await db.query(
+      `INSERT INTO user_sessions (user_id, token_hash, expires_at, ip_address, user_agent) 
+       VALUES ($1, $2, $3, $4, $5)`,
+      [
+        user.id, 
+        token, 
+        new Date(Date.now() + 7 * 24 * 60 * 60 * 1000), // 7 days
+        req.ip,
+        req.get('User-Agent')
+      ]
+    );
+
+    // Add user to general room
+    await db.query(
+      'INSERT INTO room_memberships (user_id, room_id, role) VALUES ($1, 1, $2) ON CONFLICT DO NOTHING',
+      [user.id, 'member']
+    );
+
+    res.status(201).json({
+      message: 'User registered successfully',
+      user: {
+        id: user.id,
+        username: user.username,
+        email: user.email,
+        display_name: user.display_name
+      },
+      token
+    });
+
+  } catch (error) {
+    console.error('Registration error:', error);
+    res.status(500).json({ error: 'Failed to register user' });
+  }
+});
+
+app.post('/api/auth/login', async (req, res) => {
+  try {
+    const { username, password } = req.body;
+
+    // Validation
+    if (!username || !password) {
+      return res.status(400).json({ error: 'Username and password are required' });
+    }
+
+    // Find user
+    const userResult = await db.query(
+      'SELECT id, username, email, password_hash, display_name FROM users WHERE username = $1 OR email = $1',
+      [username]
+    );
+
+    if (userResult.rows.length === 0) {
+      return res.status(401).json({ error: 'Invalid credentials' });
+    }
+
+    const user = userResult.rows[0];
+
+    // Check password
+    const isValidPassword = await auth.comparePassword(password, user.password_hash);
+    if (!isValidPassword) {
+      return res.status(401).json({ error: 'Invalid credentials' });
+    }
+
+    // Update last login
+    await db.query(
+      'UPDATE users SET last_login = CURRENT_TIMESTAMP WHERE id = $1',
+      [user.id]
+    );
+
+    // Generate token
+    const token = auth.generateToken(user.id);
+
+    // Create session
+    await db.query(
+      `INSERT INTO user_sessions (user_id, token_hash, expires_at, ip_address, user_agent) 
+       VALUES ($1, $2, $3, $4, $5)`,
+      [
+        user.id, 
+        token, 
+        new Date(Date.now() + 7 * 24 * 60 * 60 * 1000), // 7 days
+        req.ip,
+        req.get('User-Agent')
+      ]
+    );
+
+    res.json({
+      message: 'Login successful',
+      user: {
+        id: user.id,
+        username: user.username,
+        email: user.email,
+        display_name: user.display_name
+      },
+      token
+    });
+
+  } catch (error) {
+    console.error('Login error:', error);
+    res.status(500).json({ error: 'Failed to login' });
+  }
+});
+
+app.post('/api/auth/logout', auth.authenticateToken, async (req, res) => {
+  try {
+    const authHeader = req.headers['authorization'];
+    const token = authHeader && authHeader.split(' ')[1];
+
+    // Remove session
+    await db.query(
+      'DELETE FROM user_sessions WHERE user_id = $1 AND token_hash = $2',
+      [req.user.id, token]
+    );
+
+    res.json({ message: 'Logout successful' });
+  } catch (error) {
+    console.error('Logout error:', error);
+    res.status(500).json({ error: 'Failed to logout' });
+  }
+});
+
+app.get('/api/auth/profile', auth.authenticateToken, async (req, res) => {
+  try {
+    const userResult = await db.query(
+      'SELECT id, username, email, display_name, created_at, last_login FROM users WHERE id = $1',
+      [req.user.id]
+    );
+
+    if (userResult.rows.length === 0) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    res.json({ user: userResult.rows[0] });
+  } catch (error) {
+    console.error('Profile error:', error);
+    res.status(500).json({ error: 'Failed to fetch profile' });
+  }
+});
+
+// Chat routes
+app.get('/api/rooms', auth.optionalAuth, async (req, res) => {
+  try {
+    let query = `
+      SELECT cr.*, 
+             COUNT(rm.user_id) as member_count,
+             CASE WHEN $1 IS NOT NULL THEN 
+               (SELECT role FROM room_memberships WHERE user_id = $1 AND room_id = cr.id)
+             ELSE NULL END as user_role
+      FROM chat_rooms cr
+      LEFT JOIN room_memberships rm ON cr.id = rm.room_id
+      WHERE cr.is_private = FALSE OR $1 IS NOT NULL
+      GROUP BY cr.id
+      ORDER BY cr.updated_at DESC
+    `;
+
+    const result = await db.query(query, [req.user?.id]);
     res.json(result.rows);
+  } catch (error) {
+    console.error('Error fetching rooms:', error);
+    res.status(500).json({ error: 'Failed to fetch rooms' });
+  }
+});
+
+app.get('/api/rooms/:roomId/messages', auth.optionalAuth, async (req, res) => {
+  try {
+    const { roomId } = req.params;
+    const { limit = 50, offset = 0 } = req.query;
+
+    // Check if user has access to the room
+    if (req.user) {
+      const accessResult = await db.query(
+        'SELECT * FROM room_memberships WHERE user_id = $1 AND room_id = $2',
+        [req.user.id, roomId]
+      );
+
+      if (accessResult.rows.length === 0) {
+        // Check if room is public
+        const roomResult = await db.query(
+          'SELECT is_private FROM chat_rooms WHERE id = $1',
+          [roomId]
+        );
+
+        if (roomResult.rows.length === 0 || roomResult.rows[0].is_private) {
+          return res.status(403).json({ error: 'Access denied' });
+        }
+      }
+    }
+
+    const result = await db.query(
+      `SELECT m.*, u.username, u.display_name
+       FROM messages m
+       JOIN users u ON m.user_id = u.id
+       WHERE m.room_id = $1 AND m.is_deleted = FALSE
+       ORDER BY m.sent_at DESC
+       LIMIT $2 OFFSET $3`,
+      [roomId, parseInt(limit), parseInt(offset)]
+    );
+
+    res.json(result.rows.reverse()); // Return in chronological order
   } catch (error) {
     console.error('Error fetching messages:', error);
     res.status(500).json({ error: 'Failed to fetch messages' });
@@ -117,65 +360,119 @@ app.get('/api/rooms/:roomId/messages', async (req, res) => {
 
 // WebSocket events
 const onlineUsers = new Map(); // userId -> socket.id
+const socketUsers = new Map(); // socket.id -> userId
 
 io.on('connection', (socket) => {
   console.log('A user connected:', socket.id);
 
-  // Track user online status
-  socket.on('userOnline', (userId) => {
-    onlineUsers.set(userId, socket.id);
-    io.emit('onlineUsers', Array.from(onlineUsers.keys()));
+  // Authenticate socket connection
+  socket.on('authenticate', async (token) => {
+    try {
+      const decoded = auth.verifyToken(token);
+      if (!decoded) {
+        socket.emit('authError', { message: 'Invalid token' });
+        return;
+      }
+
+      // Verify session exists
+      const sessionResult = await db.query(
+        'SELECT * FROM user_sessions WHERE user_id = $1 AND token_hash = $2 AND expires_at > CURRENT_TIMESTAMP',
+        [decoded.userId, token]
+      );
+
+      if (sessionResult.rows.length === 0) {
+        socket.emit('authError', { message: 'Session expired' });
+        return;
+      }
+
+      // Store user info
+      socketUsers.set(socket.id, decoded.userId);
+      onlineUsers.set(decoded.userId, socket.id);
+
+      // Get user info
+      const userResult = await db.query(
+        'SELECT id, username, display_name FROM users WHERE id = $1',
+        [decoded.userId]
+      );
+
+      socket.user = userResult.rows[0];
+      socket.emit('authenticated', { user: socket.user });
+      io.emit('onlineUsers', Array.from(onlineUsers.keys()));
+
+      console.log('User authenticated:', socket.user.username);
+    } catch (error) {
+      console.error('Socket authentication error:', error);
+      socket.emit('authError', { message: 'Authentication failed' });
+    }
   });
 
   // Join a room
-  socket.on('joinRoom', (roomId) => {
-    socket.join(roomId);
+  socket.on('joinRoom', async (roomId) => {
+    try {
+      if (!socket.user) {
+        socket.emit('error', { message: 'Not authenticated' });
+        return;
+      }
+
+      // Check if user has access to the room
+      const accessResult = await db.query(
+        'SELECT * FROM room_memberships WHERE user_id = $1 AND room_id = $2',
+        [socket.user.id, roomId]
+      );
+
+      if (accessResult.rows.length === 0) {
+        // Check if room is public
+        const roomResult = await db.query(
+          'SELECT is_private FROM chat_rooms WHERE id = $1',
+          [roomId]
+        );
+
+        if (roomResult.rows.length === 0 || roomResult.rows[0].is_private) {
+          socket.emit('error', { message: 'Access denied to room' });
+          return;
+        }
+      }
+
+      socket.join(roomId);
+      socket.emit('roomJoined', { roomId });
+      console.log(`User ${socket.user.username} joined room ${roomId}`);
+    } catch (error) {
+      console.error('Error joining room:', error);
+      socket.emit('error', { message: 'Failed to join room' });
+    }
   });
 
   // Handle new message
-  socket.on('chatMessage', async ({ roomId, userId, content }) => {
+  socket.on('chatMessage', async ({ roomId, content }) => {
     try {
-      console.log('Received message:', { roomId, userId, content });
-      
-      // First, ensure the user exists in the database
-      let userResult = await db.query('SELECT id FROM users WHERE id = $1', [userId]);
-      
-      if (userResult.rows.length === 0) {
-        // Create the user if they don't exist
-        console.log('Creating new user:', userId);
-        userResult = await db.query(
-          'INSERT INTO users (id, username) VALUES ($1, $2) RETURNING id',
-          [userId, `User ${userId}`]
-        );
+      if (!socket.user) {
+        socket.emit('error', { message: 'Not authenticated' });
+        return;
       }
-      
-      // Ensure the room exists
-      let roomResult = await db.query('SELECT id FROM chat_rooms WHERE id = $1', [roomId]);
-      
-      if (roomResult.rows.length === 0) {
-        // Create the room if it doesn't exist
-        console.log('Creating new room:', roomId);
-        roomResult = await db.query(
-          'INSERT INTO chat_rooms (id, name) VALUES ($1, $2) RETURNING id',
-          [roomId, `Room ${roomId}`]
-        );
-      }
+
+      console.log('Received message:', { roomId, userId: socket.user.id, content });
       
       // Save message to DB
       const result = await db.query(
         `INSERT INTO messages (room_id, user_id, content) VALUES ($1, $2, $3) RETURNING *`,
-        [roomId, userId, content]
+        [roomId, socket.user.id, content]
       );
       const message = result.rows[0];
       
-      console.log('Message saved:', message);
+      // Get user info for the message
+      const messageWithUser = {
+        ...message,
+        username: socket.user.username,
+        display_name: socket.user.display_name
+      };
+      
+      console.log('Message saved:', messageWithUser);
 
       // Broadcast to room
-      io.to(roomId).emit('chatMessage', message);
+      io.to(roomId).emit('chatMessage', messageWithUser);
       
     } catch (error) {
       console.error('Error handling chat message:', error);
-      // Send error back to the client
       socket.emit('chatError', { 
         message: 'Failed to send message',
         error: error.message 
@@ -184,19 +481,21 @@ io.on('connection', (socket) => {
   });
 
   socket.on('disconnect', () => {
-    // Remove user from onlineUsers
-    for (const [userId, id] of onlineUsers.entries()) {
-      if (id === socket.id) {
-        onlineUsers.delete(userId);
-        break;
-      }
+    const userId = socketUsers.get(socket.id);
+    if (userId) {
+      onlineUsers.delete(userId);
+      socketUsers.delete(socket.id);
+      io.emit('onlineUsers', Array.from(onlineUsers.keys()));
+      console.log('User disconnected:', socket.id);
     }
-    io.emit('onlineUsers', Array.from(onlineUsers.keys()));
-    console.log('User disconnected:', socket.id);
   });
 });
+
+// Clean up expired sessions periodically
+setInterval(auth.cleanupExpiredSessions, 60 * 60 * 1000); // Every hour
 
 const PORT = process.env.PORT || 4000;
 server.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
+  console.log('JWT Secret:', process.env.JWT_SECRET ? 'Set' : 'Using default (change in production)');
 });
