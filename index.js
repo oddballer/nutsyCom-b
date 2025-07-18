@@ -27,11 +27,9 @@ console.log('NODE_ENV:', process.env.NODE_ENV);
 
 const io = new Server(server, {
   cors: {
-    origin: process.env.NODE_ENV === 'production' 
-      ? allowedOrigins
-      : '*',
+    origin: true, // Allow all origins for now to fix the connection issue
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-    credentials: true,
+    credentials: false, // Disable credentials for cross-origin
     allowedHeaders: ['Content-Type', 'Authorization']
   }
 });
@@ -56,10 +54,8 @@ app.use((req, res, next) => {
 });
 
 app.use(cors({
-  origin: process.env.NODE_ENV === 'production' 
-    ? allowedOrigins
-    : '*',
-  credentials: true,
+  origin: true, // Allow all origins for now to fix the connection issue
+  credentials: false, // Disable credentials for cross-origin
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization']
 }));
@@ -505,20 +501,29 @@ io.on('connection', (socket) => {
       socket.emit('error', { message: 'Not authenticated' });
       return;
     }
+    
+    console.log(`WebRTC Join: User ${socket.user.username} (${socket.user.id}) joining call in room ${roomId}`);
+    
     // Add user to callMembers set for this room
     if (!callMembers.has(roomId)) callMembers.set(roomId, new Set());
     callMembers.get(roomId).add(socket.user.id);
+    
+    console.log(`Call members in room ${roomId}:`, Array.from(callMembers.get(roomId)));
 
     // Notify others in the room that a user joined the call
     socket.to(roomId).emit('webrtc-user-joined', { userId: socket.user.id });
+    console.log(`Emitted webrtc-user-joined to room ${roomId} for user ${socket.user.id}`);
 
     // Only users in the call should notify the joining user
     const clients = io.sockets.adapter.rooms.get(roomId);
+    console.log(`Clients in room ${roomId}:`, clients ? Array.from(clients) : 'No clients');
+    
     if (clients) {
       for (const clientId of clients) {
         if (clientId !== socket.id) {
           const clientSocket = io.sockets.sockets.get(clientId);
           if (clientSocket && clientSocket.user && callMembers.get(roomId)?.has(clientSocket.user.id)) {
+            console.log(`Notifying joining user about existing call member: ${clientSocket.user.username} (${clientSocket.user.id})`);
             socket.emit('webrtc-user-joined', { userId: clientSocket.user.id });
           }
         }
@@ -549,13 +554,20 @@ io.on('connection', (socket) => {
       socket.emit('error', { message: 'Not authenticated' });
       return;
     }
+    
+    console.log(`WebRTC Leave: User ${socket.user.username} (${socket.user.id}) leaving call in room ${roomId}`);
+    
     // Remove user from callMembers set for this room
     if (callMembers.has(roomId)) {
       callMembers.get(roomId).delete(socket.user.id);
       if (callMembers.get(roomId).size === 0) callMembers.delete(roomId);
     }
+    
+    console.log(`Call members in room ${roomId} after leave:`, callMembers.has(roomId) ? Array.from(callMembers.get(roomId)) : 'No members');
+    
     // Notify others in the room that a user left the call
     socket.to(roomId).emit('webrtc-user-left', { userId: socket.user.id });
+    console.log(`Emitted webrtc-user-left to room ${roomId} for user ${socket.user.id}`);
   });
 
   // On disconnect, remove user from all callMembers sets
