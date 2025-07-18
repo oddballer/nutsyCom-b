@@ -495,6 +495,45 @@ io.on('connection', (socket) => {
     }
   });
 
+  // --- WebRTC Signaling Events ---
+
+  // User joins the WebRTC call in a room
+  socket.on('webrtc-join', (roomId) => {
+    if (!socket.user) {
+      socket.emit('error', { message: 'Not authenticated' });
+      return;
+    }
+    // Notify others in the room that a user joined the call
+    socket.to(roomId).emit('webrtc-user-joined', { userId: socket.user.id });
+  });
+
+  // Relay WebRTC signaling data (offer/answer/ICE)
+  socket.on('webrtc-signal', ({ roomId, targetUserId, signalData }) => {
+    if (!socket.user) {
+      socket.emit('error', { message: 'Not authenticated' });
+      return;
+    }
+    // Send signaling data to a specific user in the room
+    // Find the socket ID for the target user
+    const targetSocketId = Array.from(io.sockets.sockets.values()).find(s => s.user && s.user.id === targetUserId)?.id;
+    if (targetSocketId) {
+      io.to(targetSocketId).emit('webrtc-signal', {
+        fromUserId: socket.user.id,
+        signalData
+      });
+    }
+  });
+
+  // User leaves the WebRTC call in a room
+  socket.on('webrtc-leave', (roomId) => {
+    if (!socket.user) {
+      socket.emit('error', { message: 'Not authenticated' });
+      return;
+    }
+    // Notify others in the room that a user left the call
+    socket.to(roomId).emit('webrtc-user-left', { userId: socket.user.id });
+  });
+
   socket.on('disconnect', async () => {
     const userId = socketUsers.get(socket.id);
     if (userId) {
