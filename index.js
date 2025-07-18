@@ -548,22 +548,39 @@ io.on('connection', (socket) => {
         }
       }
     }
+    
+    // If this is the first user in the call, broadcast to all users in the room
+    // so they can see the call status even if they haven't joined yet
+    if (callMembers.get(roomId).size === 1) {
+      console.log(`First user in call, broadcasting call status to all users in room ${roomId}`);
+      socket.to(roomId).emit('call-started', { 
+        roomId, 
+        callMembers: Array.from(callMembers.get(roomId)) 
+      });
+    }
   });
 
   // Relay WebRTC signaling data (offer/answer/ICE)
   socket.on('webrtc-signal', ({ roomId, targetUserId, signalData }) => {
     if (!socket.user) {
+      console.log('WebRTC Signal: User not authenticated');
       socket.emit('error', { message: 'Not authenticated' });
       return;
     }
+    
+    console.log(`WebRTC Signal: User ${socket.user.username} (${socket.user.id}) sending ${signalData.type} to user ${targetUserId}`);
+    
     // Send signaling data to a specific user in the room
     // Find the socket ID for the target user
     const targetSocketId = Array.from(io.sockets.sockets.values()).find(s => s.user && s.user.id === targetUserId)?.id;
     if (targetSocketId) {
+      console.log(`WebRTC Signal: Relaying ${signalData.type} from ${socket.user.id} to ${targetUserId} (socket: ${targetSocketId})`);
       io.to(targetSocketId).emit('webrtc-signal', {
         fromUserId: socket.user.id,
         signalData
       });
+    } else {
+      console.log(`WebRTC Signal: Target user ${targetUserId} not found`);
     }
   });
 
