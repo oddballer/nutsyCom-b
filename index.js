@@ -505,6 +505,20 @@ io.on('connection', (socket) => {
     }
     // Notify others in the room that a user joined the call
     socket.to(roomId).emit('webrtc-user-joined', { userId: socket.user.id });
+
+    // NEW: Ask all other users in the room to notify the joining user
+    // Get all sockets in the room except the joining user
+    const clients = io.sockets.adapter.rooms.get(roomId);
+    if (clients) {
+      for (const clientId of clients) {
+        if (clientId !== socket.id) {
+          const clientSocket = io.sockets.sockets.get(clientId);
+          if (clientSocket && clientSocket.user) {
+            socket.emit('webrtc-user-joined', { userId: clientSocket.user.id });
+          }
+        }
+      }
+    }
   });
 
   // Relay WebRTC signaling data (offer/answer/ICE)
