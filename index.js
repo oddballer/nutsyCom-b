@@ -423,9 +423,12 @@ io.on('connection', (socket) => {
   socket.on('joinRoom', async (roomId) => {
     try {
       if (!socket.user) {
+        console.log('JoinRoom: User not authenticated');
         socket.emit('error', { message: 'Not authenticated' });
         return;
       }
+
+      console.log(`JoinRoom: User ${socket.user.username} (${socket.user.id}) attempting to join room ${roomId}`);
 
       // Check if user has access to the room
       const accessResult = await db.query(
@@ -441,6 +444,7 @@ io.on('connection', (socket) => {
         );
 
         if (roomResult.rows.length === 0 || roomResult.rows[0].is_private) {
+          console.log(`JoinRoom: Access denied to room ${roomId} for user ${socket.user.username}`);
           socket.emit('error', { message: 'Access denied to room' });
           return;
         }
@@ -448,7 +452,12 @@ io.on('connection', (socket) => {
 
       socket.join(roomId);
       socket.emit('roomJoined', { roomId });
-      console.log(`User ${socket.user.username} joined room ${roomId}`);
+      console.log(`JoinRoom: User ${socket.user.username} (${socket.user.id}) successfully joined room ${roomId}`);
+      console.log(`JoinRoom: Socket ID ${socket.id} is now in room ${roomId}`);
+      
+      // Log all clients in the room after join
+      const clients = io.sockets.adapter.rooms.get(roomId);
+      console.log(`JoinRoom: All clients in room ${roomId}:`, clients ? Array.from(clients) : 'No clients');
     } catch (error) {
       console.error('Error joining room:', error);
       socket.emit('error', { message: 'Failed to join room' });
@@ -498,11 +507,13 @@ io.on('connection', (socket) => {
   // User joins the WebRTC call in a room
   socket.on('webrtc-join', (roomId) => {
     if (!socket.user) {
+      console.log('WebRTC Join: User not authenticated');
       socket.emit('error', { message: 'Not authenticated' });
       return;
     }
     
     console.log(`WebRTC Join: User ${socket.user.username} (${socket.user.id}) joining call in room ${roomId}`);
+    console.log(`Socket ID: ${socket.id}`);
     
     // Add user to callMembers set for this room
     if (!callMembers.has(roomId)) callMembers.set(roomId, new Set());
@@ -511,17 +522,25 @@ io.on('connection', (socket) => {
     console.log(`Call members in room ${roomId}:`, Array.from(callMembers.get(roomId)));
 
     // Notify others in the room that a user joined the call
+    console.log(`Broadcasting webrtc-user-joined to room ${roomId} for user ${socket.user.id}`);
     socket.to(roomId).emit('webrtc-user-joined', { userId: socket.user.id });
-    console.log(`Emitted webrtc-user-joined to room ${roomId} for user ${socket.user.id}`);
-
-    // Only users in the call should notify the joining user
+    
+    // Log all clients in the room
     const clients = io.sockets.adapter.rooms.get(roomId);
-    console.log(`Clients in room ${roomId}:`, clients ? Array.from(clients) : 'No clients');
+    console.log(`All clients in room ${roomId}:`, clients ? Array.from(clients) : 'No clients');
     
     if (clients) {
+      console.log('Checking existing call members to notify joining user...');
       for (const clientId of clients) {
         if (clientId !== socket.id) {
           const clientSocket = io.sockets.sockets.get(clientId);
+          console.log(`Client ${clientId}:`, clientSocket ? {
+            hasUser: !!clientSocket.user,
+            userId: clientSocket.user?.id,
+            username: clientSocket.user?.username,
+            inCallMembers: callMembers.get(roomId)?.has(clientSocket.user?.id)
+          } : 'No socket found');
+          
           if (clientSocket && clientSocket.user && callMembers.get(roomId)?.has(clientSocket.user.id)) {
             console.log(`Notifying joining user about existing call member: ${clientSocket.user.username} (${clientSocket.user.id})`);
             socket.emit('webrtc-user-joined', { userId: clientSocket.user.id });
