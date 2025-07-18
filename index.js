@@ -361,6 +361,8 @@ app.get('/api/rooms/:roomId/messages', auth.optionalAuth, async (req, res) => {
 // WebSocket events
 const onlineUsers = new Map(); // userId -> socket.id
 const socketUsers = new Map(); // socket.id -> userId
+// --- WebRTC Call Membership Tracking ---
+const callMembers = new Map(); // roomId -> Set of userIds
 
 // Helper to emit all online user objects
 async function emitOnlineUsers() {
@@ -503,17 +505,20 @@ io.on('connection', (socket) => {
       socket.emit('error', { message: 'Not authenticated' });
       return;
     }
+    // Add user to callMembers set for this room
+    if (!callMembers.has(roomId)) callMembers.set(roomId, new Set());
+    callMembers.get(roomId).add(socket.user.id);
+
     // Notify others in the room that a user joined the call
     socket.to(roomId).emit('webrtc-user-joined', { userId: socket.user.id });
 
-    // NEW: Ask all other users in the room to notify the joining user
-    // Get all sockets in the room except the joining user
+    // Only users in the call should notify the joining user
     const clients = io.sockets.adapter.rooms.get(roomId);
     if (clients) {
       for (const clientId of clients) {
         if (clientId !== socket.id) {
           const clientSocket = io.sockets.sockets.get(clientId);
-          if (clientSocket && clientSocket.user) {
+          if (clientSocket && clientSocket.user && callMembers.get(roomId)?.has(clientSocket.user.id)) {
             socket.emit('webrtc-user-joined', { userId: clientSocket.user.id });
           }
         }
@@ -544,15 +549,29 @@ io.on('connection', (socket) => {
       socket.emit('error', { message: 'Not authenticated' });
       return;
     }
+    // Remove user from callMembers set for this room
+    if (callMembers.has(roomId)) {
+      callMembers.get(roomId).delete(socket.user.id);
+      if (callMembers.get(roomId).size === 0) callMembers.delete(roomId);
+    }
     // Notify others in the room that a user left the call
     socket.to(roomId).emit('webrtc-user-left', { userId: socket.user.id });
   });
 
+  // On disconnect, remove user from all callMembers sets
   socket.on('disconnect', async () => {
     const userId = socketUsers.get(socket.id);
     if (userId) {
       onlineUsers.delete(userId);
       socketUsers.delete(socket.id);
+      // Remove from all callMembers sets
+      for (const [roomId, members] of callMembers.entries()) {
+        if (members.has(userId)) {
+          members.delete(userId);
+          socket.to(roomId).emit('webrtc-user-left', { userId });
+        }
+        if (members.size === 0) callMembers.delete(roomId);
+      }
       await emitOnlineUsers();
       console.log('User disconnected:', socket.id);
     }
